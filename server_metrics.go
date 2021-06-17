@@ -18,6 +18,7 @@ type ServerMetrics struct {
 	serverHandledHistogramEnabled bool
 	serverHandledHistogramOpts    prom.HistogramOpts
 	serverHandledHistogram        *prom.HistogramVec
+	errMsgMaxLength               uint8
 }
 
 // NewServerMetrics returns a ServerMetrics object. Use a new instance of
@@ -36,7 +37,7 @@ func NewServerMetrics(counterOpts ...CounterOption) *ServerMetrics {
 			opts.apply(prom.CounterOpts{
 				Name: "grpc_server_handled_total",
 				Help: "Total number of RPCs completed on the server, regardless of success or failure.",
-			}), []string{"grpc_type", "grpc_service", "grpc_method", "grpc_code"}),
+			}), []string{"grpc_type", "grpc_service", "grpc_method", "grpc_code", "err_msg"}),
 		serverStreamMsgReceived: prom.NewCounterVec(
 			opts.apply(prom.CounterOpts{
 				Name: "grpc_server_msg_received_total",
@@ -74,6 +75,10 @@ func (m *ServerMetrics) EnableHandlingTimeHistogram(opts ...HistogramOption) {
 	m.serverHandledHistogramEnabled = true
 }
 
+func (m *ServerMetrics) EnableErrMsgSlugLabel(maxLength uint8) {
+	m.errMsgMaxLength = maxLength
+}
+
 // Describe sends the super-set of all possible descriptors of metrics
 // collected by this Collector to the provided channel and returns once
 // the last descriptor has been sent.
@@ -103,11 +108,11 @@ func (m *ServerMetrics) Collect(ch chan<- prom.Metric) {
 // UnaryServerInterceptor is a gRPC server-side interceptor that provides Prometheus monitoring for Unary RPCs.
 func (m *ServerMetrics) UnaryServerInterceptor() func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-		monitor := newServerReporter(m, Unary, info.FullMethod)
+		monitor := newServerReporter(m, Unary, info.FullMethod, m.errMsgMaxLength)
 		monitor.ReceivedMessage()
 		resp, err := handler(ctx, req)
 		st, _ := grpcstatus.FromError(err)
-		monitor.Handled(st.Code())
+		monitor.HandledWithStatus(st)
 		if err == nil {
 			monitor.SentMessage()
 		}
@@ -118,10 +123,10 @@ func (m *ServerMetrics) UnaryServerInterceptor() func(ctx context.Context, req i
 // StreamServerInterceptor is a gRPC server-side interceptor that provides Prometheus monitoring for Streaming RPCs.
 func (m *ServerMetrics) StreamServerInterceptor() func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		monitor := newServerReporter(m, streamRPCType(info), info.FullMethod)
+		monitor := newServerReporter(m, streamRPCType(info), info.FullMethod, uint8(0))
 		err := handler(srv, &monitoredServerStream{ss, monitor})
 		st, _ := grpcstatus.FromError(err)
-		monitor.Handled(st.Code())
+		monitor.HandledWithStatus(st)
 		return err
 	}
 }
@@ -181,6 +186,6 @@ func preRegisterMethod(metrics *ServerMetrics, serviceName string, mInfo *grpc.M
 		metrics.serverHandledHistogram.GetMetricWithLabelValues(methodType, serviceName, methodName)
 	}
 	for _, code := range allCodes {
-		metrics.serverHandledCounter.GetMetricWithLabelValues(methodType, serviceName, methodName, code.String())
+		metrics.serverHandledCounter.GetMetricWithLabelValues(methodType, serviceName, methodName, code.String(), "")
 	}
 }
